@@ -293,22 +293,42 @@ function Read-Zip([string]$Path, [string[]]$Names) {
 }
 
 # Copies the .zip at $Path to $OutFile and rewrites the entries in $Replace, a
-# table of entry name to new bytes, in place, so entry order is unchanged.
+# table of entry name to new bytes, so entry order is unchanged. Writes a
+# fresh archive rather than editing one in place with ZipArchiveMode.Update:
+# when an entry's size changes, Update mode rewrites every entry after it on
+# Dispose, and that rewrite can leave zero-length Stored entries, i.e.
+# directories, flagged as if a data descriptor follows them even though none
+# does. .NET's own reader doesn't mind, but Java's ZipInputStream rejects the
+# result with "only DEFLATED entries can have EXT descriptor", which breaks
+# every Designer and Vision Client launcher that unpacks the archive.
 function Update-Zip([string]$Path, [hashtable]$Replace, [string]$OutFile) {
-  Copy-Item $Path $OutFile -Force -ErrorAction Stop
-  $zip = [IO.Compression.ZipFile]::Open($OutFile, [IO.Compression.ZipArchiveMode]::Update)
+  if (Test-Path $OutFile) { Remove-Item $OutFile -Force }
+  $inZip = [IO.Compression.ZipFile]::OpenRead($Path)
   try {
-    foreach ($name in $Replace.Keys) {
-      $stream = $zip.GetEntry($name).Open()
-      try {
-        $stream.SetLength(0)
-        $stream.Write($Replace[$name], 0, $Replace[$name].Length)
-      } finally {
-        $stream.Dispose()
+    $outZip = [IO.Compression.ZipFile]::Open($OutFile, [IO.Compression.ZipArchiveMode]::Create)
+    try {
+      foreach ($entry in $inZip.Entries) {
+        $newEntry = $outZip.CreateEntry($entry.FullName, [IO.Compression.CompressionLevel]::Optimal)
+        $newEntry.LastWriteTime = $entry.LastWriteTime
+        $newEntry.ExternalAttributes = $entry.ExternalAttributes
+        $out = $newEntry.Open()
+        try {
+          if ($Replace.ContainsKey($entry.FullName)) {
+            $bytes = $Replace[$entry.FullName]
+            $out.Write($bytes, 0, $bytes.Length)
+          } else {
+            $in = $entry.Open()
+            try { $in.CopyTo($out) } finally { $in.Dispose() }
+          }
+        } finally {
+          $out.Dispose()
+        }
       }
+    } finally {
+      $outZip.Dispose()
     }
   } finally {
-    $zip.Dispose()
+    $inZip.Dispose()
   }
 }
 
